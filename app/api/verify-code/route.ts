@@ -4,13 +4,15 @@ import { z } from "zod";
 import { verifySchema } from "@/schemas/verifySchema";
 
 const CheckVerifyCode = z.object({
-  verifyCode: verifySchema,
+  verifyCode: verifySchema.shape.verifyCode,
 });
 
 export async function POST(request: Request) {
   await dbConnect();
   try {
-    const { verifyCode, username } = await request.json();
+    const { username, verifyCode } = await request.json();
+    console.log("Received username:", username);
+    console.log("Received verifyCode:", verifyCode);
     const verifiedCode = CheckVerifyCode.safeParse({ verifyCode });
     if (!verifiedCode.success) {
       const codeErrors = verifiedCode.error.format().verifyCode?._errors || [];
@@ -26,6 +28,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+    console.log("Verified code:", verifiedCode.data.verifyCode);
     const decodedUsername = decodeURIComponent(username);
     const user = await UserModel.findOne({ username: decodedUsername });
     if (!user) {
