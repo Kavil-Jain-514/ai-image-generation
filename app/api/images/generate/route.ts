@@ -14,18 +14,21 @@ const CheckPrompt = z.object({
 
 export async function POST(request: Request) {
   await dbConnect();
+
   const session = await getServerSession(authOptions);
-  const user: User | null = session?.user || null;
-  if (!session || !session.user) {
+  if (!session?.user?._id) {
     return Response.json(
       { success: false, message: "Unauthorized" },
       { status: 401 }
     );
   }
-  const userID = user?._id;
+
+  const userID = session.user._id;
+
   try {
     const body = await request.json();
-    const parsedPrompt = CheckPrompt.safeParse({ prompt: body });
+
+    const parsedPrompt = CheckPrompt.safeParse({ prompt: body.prompt });
     if (!parsedPrompt.success) {
       const promptErrors = parsedPrompt.error.format().prompt?._errors || [];
       return Response.json(
@@ -35,21 +38,21 @@ export async function POST(request: Request) {
             promptErrors.length > 0
               ? promptErrors.join(", ")
               : "Invalid prompt",
-          errors: promptErrors,
         },
         { status: 400 }
       );
     }
+
     const prompt = parsedPrompt.data.prompt;
-    // Fetch user from DB to check credits
-    const user = await UserModel.findById(userID);
+
+    // ✅ ATOMIC CREDIT DEDUCTION (RIGHT HERE)
+    const user = await UserModel.findOneAndUpdate(
+      { _id: userID, credits: { $gt: 0 } },
+      { $inc: { credits: -1 } },
+      { new: true }
+    );
+
     if (!user) {
-      return Response.json(
-        { success: false, message: "User not found" },
-        { status: 404 }
-      );
-    }
-    if (user.credits <= 0) {
       return Response.json(
         {
           success: false,
@@ -58,7 +61,8 @@ export async function POST(request: Request) {
         { status: 402 }
       );
     }
-    // 🧠 Generate image (getimg.ai text-to-image)
+
+    // 🧠 Generate image (getimg.ai)
     const response = await fetch(
       "https://api.getimg.ai/v1/seedream-v4/text-to-image",
       {
@@ -67,18 +71,20 @@ export async function POST(request: Request) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${process.env.GETIMG_API_KEY}`,
         },
-        body: JSON.stringify({
-          prompt,
-        }),
+        body: JSON.stringify({ prompt }),
       }
     );
 
     if (!response.ok) {
+      // Optional: refund credit here
+      await UserModel.updateOne({ _id: userID }, { $inc: { credits: 1 } });
+
       return Response.json(
         { success: false, message: "Error generating image" },
         { status: 500 }
       );
     }
+
     const result = await response.json();
     const base64Image = result?.images?.[0]?.image;
 
@@ -89,18 +95,12 @@ export async function POST(request: Request) {
     const imageUrl = await uploadBase64Image(base64Image);
     const generatedTitle = generateImageTitle(prompt);
 
-    // Save generated image info to DB
     const image = await ImageModel.create({
       userId: user._id,
       title: generatedTitle || prompt.slice(0, 60),
       prompt,
       imageUrl: imageUrl.secure_url,
     });
-    // Deduct credit
-    await UserModel.updateOne(
-      { _id: user._id, credits: { $gt: 0 } },
-      { $inc: { credits: -1 } }
-    );
 
     return Response.json(
       {
@@ -114,7 +114,7 @@ export async function POST(request: Request) {
             prompt: image.prompt,
             createdAt: image.createdAt,
           },
-          remainingCredits: user.credits - 1,
+          remainingCredits: user.credits, // already decremented
         },
       },
       { status: 201 }
@@ -122,11 +122,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("IMAGE_GENERATION_ERROR:", error);
     return Response.json(
-      {
-        success: false,
-        message: "Error generating image",
-        error: String(error),
-      },
+      { success: false, message: "Error generating image" },
       { status: 500 }
     );
   }
